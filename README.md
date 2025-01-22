@@ -32,8 +32,9 @@ The MQTT messages instructing the scheduler should provide the following informa
 Since an optimal scheduling routine must be found, FIFO and RR are ruled out.
 Non-preemtive scheduling is easier to implement, so let's go with that.
 
-non-preemptive scheduling routines that match the task description:
+non-preemptive scheduling routines that find optimal solutions:
 
-EDF
-
-SJF
+sort the priority queue by time left after completion
+`let time_remaining = task.deadline - now.as_millis().unwrap()`
+`let time_left_after_completion = time_remaining - task.processing_time`
+with the least amount of time remaining having the highest priority.
