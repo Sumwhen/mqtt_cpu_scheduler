@@ -26,3 +26,14 @@ The MQTT messages instructing the scheduler should provide the following informa
 1. Set up an MQTT broker (e.g. Mosquitto) in a container. (DONE)
 2. Implement the scheduler with its worker threads (in Rust).
 3. Write a small producer (e.g. a Python script) to feed the scheduler with tasks.
+
+## Implementation
+
+Since an optimal scheduling routine must be found, FIFO and RR are ruled out.
+Non-preemtive scheduling is easier to implement, so let's go with that.
+
+non-preemptive scheduling routines that match the task description:
+
+EDF
+
+SJF
