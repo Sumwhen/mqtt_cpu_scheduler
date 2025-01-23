@@ -36,7 +36,9 @@ parser.add_argument('-b', '--batch_size', type=int,
 parser.add_argument('--seed', nargs='?',
     help='seed to be used')
 
-parser.add_argument('-d', '--dry', action='store_false', help='only print generated messages, do not send')
+parser.add_argument('--id', type=int, help="starting id")
+
+parser.add_argument('-d', '--dry', action='store_true', help='only print generated messages, do not send')
 
 args = parser.parse_args()
 
@@ -108,7 +110,7 @@ client.connect(broker, port, 60)
 
 client.loop_start()
 
-id = 1
+id = args.id if args.id else 1
 
 if not batch_size:
     msg_infos = []
