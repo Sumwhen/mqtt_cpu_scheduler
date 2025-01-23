@@ -76,6 +76,7 @@ async fn main() {
             let now = Instant::now();
 
             let mut tasks_to_run = Vec::new();
+            // empty the priority queue
             {
                 let mut q = task_queue_clone.lock().unwrap();
                 while let Some(task) = q.peek() {
@@ -93,33 +94,30 @@ async fn main() {
                     tasks_to_run.push(q.pop().unwrap());
                 }
             }
-
+            // for each task that was in the queue, spawn a thread
             for scheduled_task in tasks_to_run {
 
                 println!("Scheduling task #{}", scheduled_task.id);
                 let client_clone = client.clone();
 
 
-                // spawn a thread only if available
                 thread_pool.spawn(async move {
 
                     //publish_msg(&client_clone,
                     //            format!("Task spawned: \n {:#?}", scheduled_task))
                     //    .await.expect("Error with publishing spawning message");
                     time::sleep(Duration::from_millis(scheduled_task.processing_time)).await;
-                    let timestamp = SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap();
 
-                    let rn =random_percent();
+
+                    let rn = random_percent();
 
                     let s = if rn <= scheduled_task.success {"succeeded"} else {"failed"};
-                    let dl = match timestamp.as_millis() < scheduled_task.deadline as u128 {
+                    let dl = match now.elapsed().as_millis() < scheduled_task.deadline as u128 {
                         true => "completed in time",
                         false => "missed deadline"
                     };
                     publish_msg(&client_clone,
-                                format!("Task {}: \nQ: {}\nDL: {}", scheduled_task.name, "NA", scheduled_task.deadline))
+                                format!("Task {}: \nQ: {}\nDL: {}", scheduled_task.name, s, dl))
                         .await.expect("Error with publishing finishing message");
                 });
             }

@@ -142,8 +142,8 @@ else:
                 print("generated message", msg)
             id += 1
 
-        for i in msg_infos:
-            i.wait_for_publish()
+        for ii in msg_infos:
+            ii.wait_for_publish()
 
         time.sleep(sleep / 1000)
 
