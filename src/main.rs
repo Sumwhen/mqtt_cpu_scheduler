@@ -1,8 +1,9 @@
 use rand::Rng;
-use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+use rumqttc::{AsyncClient, ClientError, Event, MqttOptions, Packet, QoS};
 use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::fmt::format;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::{
@@ -11,10 +12,9 @@ use tokio::{
 };
 
 const TOPIC: &str = "schedule";
-
+const PUBLISH_TOPIC: &str = "schedule/publish";
 const NUMBER_OF_WORKERS: usize = 5;
 const KEEPALIVE_INTERVAL: u64 = 10;
-const RAND_SEED: u64 = 123456789;
 
 // the task description being sent over the network
 #[derive(Deserialize, Debug, Clone)]
@@ -57,56 +57,66 @@ async fn main() {
 
     // priority queue, state for all threads
     let task_queue: Arc<Mutex<BinaryHeap<Task>>> = Arc::new(Mutex::new(BinaryHeap::new()));
-    let semaphores = Arc::new(Semaphore::new(NUMBER_OF_WORKERS));
+    let semaphores = Arc::new(Semaphore::new(NUMBER_OF_WORKERS + 1));
+
 
     // thread dispatcher, clones for thread ownership
     let task_queue_clone = task_queue.clone();
     let semaphores_clone = semaphores.clone();
-
     tokio::spawn(async move {
         loop {
+            // TODO: let deadline be a ms uint, and compare to this instant
+
             let now = Instant::now();
 
             let mut tasks_to_run = Vec::new();
             {
                 let mut q = task_queue_clone.lock().unwrap();
                 while let Some(task) = q.peek() {
-                    // add any and all tasks rcv'ed via messages into the queue
-                    // TODO: drop impossible tasks
-                    if task.deadline
-                        <= SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64
+                    // add any and all tasks rcv'ed via messages into the queue, except they are not possible
+                    if task.deadline - task.processing_time >= 0
                     {
-                        q.pop();
+                        println!("TAKING FROM QUEUE: {} - {}", task.name, task.processing_time);
+                        tasks_to_run.push(q.pop().unwrap());
+                    } else {
+                        // client.publish(PUBLISH_TOPIC, QoS::AtLeastOnce, false,
+                        //                format!("impossible task {} dropped", task.name))
+                        // .await.unwrap();
+                        println!("DROPPING {} - {}", task.name, task.processing_time);
                     }
-                    tasks_to_run.push(q.pop().unwrap());
                 }
             }
 
             for scheduled_task in tasks_to_run {
+
+
                 let lock = semaphores_clone.clone().acquire_owned().await.unwrap();
+                println!("Scheduling task #{}", scheduled_task.id);
+                let client_clone = client.clone();
+
+
                 // spawn a thread only if available
                 tokio::spawn(async move {
-                    time::sleep(Duration::from_secs(scheduled_task.processing_time)).await;
-                    let timestamp = std::time::SystemTime::now()
+
+                    publish_msg(&client_clone,
+                                format!("Task spawned: \n {:#?}", scheduled_task))
+                        .await.expect("Error with publishing spawning message");
+                    time::sleep(Duration::from_millis(scheduled_task.processing_time)).await;
+                    let timestamp = SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap();
 
-                    let mut rng = rand::rng();
-                    let rn = rng.random::<f32>();
-                    let s = if rn <= scheduled_task.success {
-                        "succeeded"
-                    } else {
-                        "failed"
+                    let rn =random_percent();
+
+                    let s = if rn <= scheduled_task.success {"succeeded"} else {"failed"};
+                    let dl = match timestamp.as_millis() < scheduled_task.deadline as u128 {
+                        true => "completed in time",
+                        false => "missed deadline"
                     };
-                    if scheduled_task.deadline < timestamp.as_millis() as u64 {
-                        println!("Task {} {} in time", scheduled_task.name, s);
-                    } else {
-                        println!("Task {} missed deadline, {}", scheduled_task.name, s);
-                    }
                     drop(lock);
+                    publish_msg(&client_clone,
+                                format!("Task {}: \nQ: {}\nDL: {}", scheduled_task.name, "NA", scheduled_task.deadline))
+                        .await.expect("Error with publishing finishing message");
                 });
             }
         }
@@ -119,6 +129,7 @@ async fn main() {
             if let Ok(payload) = String::from_utf8(packet.payload.to_vec()) {
                 if let Ok(task) = serde_json::from_str::<Task>(&payload) {
                     let mut queue = task_queue.lock().unwrap();
+                    println!("Task received {:?}", &task);
                     queue.push(task);
                 } else {
                     eprintln!("Failed to deserialize task");
@@ -128,4 +139,13 @@ async fn main() {
             }
         }
     }
+}
+
+async fn publish_msg(client: &AsyncClient, msg: String) -> Result<(), ClientError> {
+    client.publish(PUBLISH_TOPIC, QoS::AtLeastOnce, false, msg).await
+}
+
+fn random_percent() -> f32 {
+    let mut rng = rand::rng();
+    rng.random()
 }
