@@ -3,9 +3,7 @@ use rumqttc::{AsyncClient, ClientError, Event, MqttOptions, Packet, QoS};
 use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::fmt::format;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
 use tokio::{
     sync::Semaphore,
     time::{self, Duration, Instant},
@@ -18,7 +16,6 @@ const NUMBER_OF_WORKERS: usize = 5;
 const KEEPALIVE_INTERVAL: u64 = 10;
 
 
-static SEM: Semaphore = Semaphore::const_new(NUMBER_OF_WORKERS);
 
 // the task description being sent over the network
 #[derive(Deserialize, Debug, Clone)]
@@ -42,13 +39,13 @@ impl Eq for Task {}
 // right now, EDF (earlies deadline first) ordering is used.
 impl PartialOrd for Task {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.deadline.cmp(&other.deadline))
+        Some(self.cmp(&other))
     }
 }
 
 impl Ord for Task {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.deadline.cmp(&other.deadline)
+        other.deadline.cmp(&self.deadline)
     }
 }
 
@@ -63,7 +60,7 @@ async fn main() {
     let task_queue: Arc<Mutex<BinaryHeap<Task>>> = Arc::new(Mutex::new(BinaryHeap::new()));
 
     let thread_pool: Runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(NUMBER_OF_WORKERS + 1)
+        .worker_threads(NUMBER_OF_WORKERS)
         .enable_time()
         .build().unwrap();
 
@@ -72,7 +69,6 @@ async fn main() {
     let task_queue_clone = task_queue.clone();
     tokio::spawn(async move {
         loop {
-            // TODO: let deadline be a ms uint, and compare to this instant
             let now = Instant::now();
 
             let mut tasks_to_run = Vec::new();
@@ -97,32 +93,41 @@ async fn main() {
             // for each task that was in the queue, spawn a thread
             for scheduled_task in tasks_to_run {
 
-                println!("Scheduling task #{}", scheduled_task.id);
+                // println!("Scheduling task #{}", scheduled_task.id);
                 let client_clone = client.clone();
 
 
+                /* println!("METRICS =============\n{} - {}",
+                         thread_pool.metrics().num_alive_tasks(), thread_pool.metrics().num_workers());
+
+
+                 */
                 thread_pool.spawn(async move {
 
                     //publish_msg(&client_clone,
                     //            format!("Task spawned: \n {:#?}", scheduled_task))
                     //    .await.expect("Error with publishing spawning message");
-                    time::sleep(Duration::from_millis(scheduled_task.processing_time)).await;
+                    let future = time::sleep(Duration::from_millis(scheduled_task.processing_time));
 
 
                     let rn = random_percent();
 
-                    let s = if rn <= scheduled_task.success {"succeeded"} else {"failed"};
+                    let s = if rn <= scheduled_task.success {"succeeded".to_string()}
+                        else {"failed".to_string()};
+
+                    future.await;
                     let dl = match now.elapsed().as_millis() < scheduled_task.deadline as u128 {
-                        true => "completed in time",
-                        false => "missed deadline"
+                        true => "completed in time".to_string(),
+                        false => "missed deadline".to_string(),
                     };
                     publish_msg(&client_clone,
-                                format!("Task {}: \nQ: {}\nDL: {}", scheduled_task.name, s, dl))
-                        .await.expect("Error with publishing finishing message");
+                                format!("COMPLETED {:8}. [{:9}] {}", scheduled_task.name, s, dl))
+                        .await.expect("Error publishing finishing message");
                 });
             }
         }
     });
+
 
     // MQTT client loop until error
     while let Ok(event) = eventloop.poll().await {
