@@ -24,17 +24,43 @@ The MQTT messages instructing the scheduler should provide the following informa
 
   To achieve this:
 1. Set up an MQTT broker (e.g. Mosquitto) in a container. (DONE)
-2. Implement the scheduler with its worker threads (in Rust).
-3. Write a small producer (e.g. a Python script) to feed the scheduler with tasks.
+2. Implement the scheduler with its worker threads (in Rust). (IMPLEMENTED, not DONE)
+3. Write a small producer (e.g. a Python script) to feed the scheduler with tasks. (DONE)
+
+## Goal
+
+Since an optimal, concurrent scheduling routine must be found, FIFO and RR are ruled out.
+It's an CPU-scheduling problem, and intuitively STR (shortest time remaining) would be a better
+solution than EDF, especially for pre-emptying the least-prio task.
+
+sort the priority queue by time left after completion
+```
+let time_remaining = task.deadline - now.as_millis().unwrap()
+let time_left_after_completion = time_remaining - task.processing_time
+```
+with the least amount of time remaining having the highest priority.
+the task with the lowest priority should be preemtied in case of new tasks arriving while
+the workers busy.
 
 ## Implementation
 
-Since an optimal scheduling routine must be found, FIFO and RR are ruled out.
-Non-preemtive scheduling is easier to implement, so let's go with that.
+Implemented is an async worker dispatcher with EDF.
+Payload:
+```rust
+struct Task {
+  id: u32,
+  // implemented as timespan (time remaining in ms), but should be timestamp 
+  deadline: u64, 
+  // ms
+  processing_time: u64,
+  // [0,1]
+  success: f32,
+  // owned string as task description
+  name: String
+}
+```
 
-non-preemptive scheduling routines that find optimal solutions:
-
-sort the priority queue by time left after completion
-`let time_remaining = task.deadline - now.as_millis().unwrap()`
-`let time_left_after_completion = time_remaining - task.processing_time`
-with the least amount of time remaining having the highest priority.
+### Possible Improvements
+1. STR => deqeue
+2. one additional thread for publishing instead of publishing in each worker thread
+3. really limit the amount of threads working, wrap everything in a runtime maybe

@@ -4,11 +4,8 @@ use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::{Arc, Mutex};
-use tokio::{
-    sync::Semaphore,
-    time::{self, Duration, Instant},
-};
 use tokio::runtime::Runtime;
+use tokio::time::{self, Duration, Instant};
 
 const TOPIC: &str = "schedule";
 const PUBLISH_TOPIC: &str = "schedule/publish";
