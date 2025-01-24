@@ -12,7 +12,8 @@ const PUBLISH_TOPIC: &str = "schedule/publish";
 const NUMBER_OF_WORKERS: usize = 5;
 const KEEPALIVE_INTERVAL: u64 = 10;
 
-
+const BROKER_HOST: &str = "localhost";
+const BROKER_PORT: u16 = 1883;
 
 // the task description being sent over the network
 #[derive(Deserialize, Debug, Clone)]
@@ -48,7 +49,7 @@ impl Ord for Task {
 
 #[tokio::main]
 async fn main() {
-    let mut mqttoptions = MqttOptions::new("scheduler-async", "localhost", 1883);
+    let mut mqttoptions = MqttOptions::new("scheduler-async", BROKER_HOST, BROKER_PORT);
     mqttoptions.set_keep_alive(Duration::from_secs(KEEPALIVE_INTERVAL));
     let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
     client.subscribe(TOPIC, QoS::AtMostOnce).await.unwrap();
