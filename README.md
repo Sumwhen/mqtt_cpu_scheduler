@@ -1,5 +1,11 @@
 # MQTT Scheduler in Rust
 
+## Setup
+
+1. Run a mqtt broker (e.g, mosquitto container) 
+2. configure main.rs for that broker
+3. 
+
 ## Task Description
 Write a scheduler that accepts, prioritizes, and handles incoming tasks. The scheduler should
 accept tasks via MQTT messages and distribute them across a fixed but configurable number of
@@ -49,8 +55,8 @@ Payload:
 ```rust
 struct Task {
   id: u32,
-  // implemented as timespan (time remaining in ms), but should be timestamp 
-  deadline: u64, 
+  // timestamp since EPOCH
+  deadline: u128, 
   // ms
   processing_time: u64,
   // [0,1]
@@ -60,7 +66,14 @@ struct Task {
 }
 ```
 
+### Scheduling
+
+After receiving the payload, the main thread (that listens for incoming mqtt messages) wraps the payload in a 
+`SchedulingTask` struct, that holds another deadline, but instead of a timestamp its the milliseconds remaining at the 
+moment of reception.
+
 ### Possible Improvements
 1. STR => deqeue
 2. one additional thread for publishing instead of publishing in each worker thread
 3. really limit the amount of threads working, wrap everything in a runtime maybe
+4. use duration instead of u64

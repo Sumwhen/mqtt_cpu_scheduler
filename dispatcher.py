@@ -65,20 +65,21 @@ def on_publish(client, userdata, mid, reason_code, properties):
     print(f"Message published with message id {mid}")
 
 
+## creates a message to send over mqtt, adding the current timestamp to the deadline
 def create_msg(name, ms, deadline, id, success):
     return json.dumps({
         "id": id, # unique id
-        "deadline": deadline, # ms since epoch
+        "deadline": deadline + int(time.time() * 1000), # ms since epoch
         "success": success, # float between 0 and 1
         "name": name, # string with name
         "processing_time": int(ms) # ms needed for processing (int)
     })
 
-# creates a random mqtt message for our purposes with supplied id, with seconds as intervals for processing
+## creates a random mqtt message for our purposes with supplied id, with intervals in ms for processing
 def random_msg(m_id):
     name = f"random_" + f"{str(m_id) = :0<6s}"
     deadline_min = 2000
-    deadline_max = 5000
+    deadline_max = 5000 + (m_id * 500)
     # deadline in seconds
     deadline = random.random() * deadline_max + deadline_min
 
@@ -95,7 +96,7 @@ def random_msg(m_id):
 def test_optimal(workers):
     msgs = []
     for i in range(workers * 2):
-        msgs.append(create_msg("y"+str(i), 1000, 1050, i, 1.))
+        msgs.append(create_msg("Task Nr. "+str(i), 1000, 1050, i, 1.))
 
     return msgs
 
