@@ -6,6 +6,8 @@ use std::collections::BinaryHeap;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::Semaphore;
 use tokio::time::{self, Duration, Instant};
 
 const TOPIC: &str = "schedule";
@@ -27,12 +29,18 @@ struct Task {
     processing_time: u64,
 }
 
+#[derive(Debug)]
 struct ScheduledTask {
     task: Task,
     // milliseconds remaining at time of reception
     deadline: u64,
     // moment of reception
     received: Instant,
+}
+
+struct FinishedTask {
+    task: ScheduledTask,
+    finished: Instant,
 }
 
 // tasks are unique by ID
@@ -52,12 +60,12 @@ impl PartialOrd for ScheduledTask {
 }
 
 trait TimeRemaining {
-    fn time_remaining(&self) -> u64;
+    fn time_remaining(&self) -> i64;
 }
 
 impl TimeRemaining for ScheduledTask {
-    fn time_remaining(&self) -> u64 {
-        (self.deadline - self.received.elapsed().as_millis() as u64) - self.task.processing_time
+    fn time_remaining(&self) -> i64 {
+        self.deadline as i64 - self.received.elapsed().as_millis() as i64 - self.task.processing_time as i64
     }
 }
 impl Ord for ScheduledTask {
@@ -66,128 +74,123 @@ impl Ord for ScheduledTask {
     }
 }
 
+#[tokio::main]
+async fn main() {
+    let mut mqttoptions = MqttOptions::new("scheduler-async", BROKER_HOST, BROKER_PORT);
+    mqttoptions.set_keep_alive(Duration::from_secs(KEEPALIVE_INTERVAL));
+    let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
+    client.subscribe(TOPIC, QoS::AtMostOnce).await.unwrap();
 
-fn main() {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(NUMBER_OF_WORKERS + 1)
-        .build()
-        .unwrap()
-        .block_on(async {
-            let mut mqttoptions = MqttOptions::new("scheduler-async", BROKER_HOST, BROKER_PORT);
-            mqttoptions.set_keep_alive(Duration::from_secs(KEEPALIVE_INTERVAL));
-            let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
-            client.subscribe(TOPIC, QoS::AtMostOnce).await.unwrap();
+    // channel used for communication between worker threads and the publishing thread
+    let (tx, mut rx) = unbounded_channel::<FinishedTask>();
+    // publishing thread
+    let client_clone = client.clone();
+    // commit thread to work-stealing runtime
+    tokio::spawn(async move {
+        while let Some(finished_task) = rx.recv().await {
+            let rn = random_percent();
 
-            // priority queue, state for all threads
-            let task_queue: Arc<Mutex<BinaryHeap<ScheduledTask>>> =
-                Arc::new(Mutex::new(BinaryHeap::new()));
+            let s = if rn <= finished_task.task.task.success {
+                "success".to_string()
+            } else {
+                "fail".to_string()
+            };
+            let dl = match finished_task.finished.elapsed().as_millis()
+                < finished_task.task.deadline as u128
+            {
+                true => "completed in time".to_string(),
+                false => "missed deadline".to_string(),
+            };
+            let real_time = finished_task.finished - finished_task.task.received;
 
+            publish_msg(
+                &client_clone,
+                format!(
+                    "COMPLETED {:8}. in {}ms (min {}ms) [{:9}] {}",
+                    finished_task.task.task.name,
+                    real_time.as_millis(),
+                    finished_task.task.deadline,
+                    s,
+                    dl
+                ),
+            )
+            .await
+            .expect("Error publishing finishing message");
+        }
+    });
 
-            // thread dispatcher, clones for thread ownership
-            let task_queue_clone = task_queue.clone();
-            tokio::spawn(async move {
-                loop {
-                    let now = Instant::now();
+    // priority queue, state for all worker threads
+    let task_queue: Arc<Mutex<BinaryHeap<ScheduledTask>>> = Arc::new(Mutex::new(BinaryHeap::new()));
+    let permits = Arc::new(Semaphore::new(NUMBER_OF_WORKERS));
 
-                    let mut tasks_to_run = Vec::new();
-                    // empty the priority queue
-                    {
-                        let mut q = task_queue_clone.lock().unwrap();
-                        while let Some(task) = q.peek() {
-                            // add any and all tasks rcv'ed via messages into the queue, except they are not possible
-                            // println!("TAKING FROM QUEUE: {} - {}", task.name, task.processing_time);
-                            if task.task.processing_time > task.deadline {
-                                // client.publish(PUBLISH_TOPIC, QoS::AtLeastOnce, false,
-                                //                format!("impossible task {} dropped", task.name))
-                                // .await.unwrap();
-                                println!(
-                                    "IMPOSSIBLE TASK: {} - {}",
-                                    task.task.name, task.task.processing_time
-                                );
-                                q.pop();
-                                continue;
-                            }
+    // thread dispatcher, clones for thread ownership
+    let permits_clone = permits.clone();
+    let task_queue_clone = task_queue.clone();
+    tokio::spawn(async move {
+        loop {
 
-                            tasks_to_run.push(q.pop().unwrap());
-                        }
-                    }
-                    // for each task that was in the queue, spawn a thread
-                    for scheduled_task in tasks_to_run {
-                        // println!("Scheduling task #{}", scheduled_task.id);
-                        let client_clone = client.clone();
-
-                        /* println!("METRICS =============\n{} - {}",
-                                thread_pool.metrics().num_alive_tasks(), thread_pool.metrics().num_workers());
-
-
-                        */
-                        tokio::spawn(async move {
-                            //publish_msg(&client_clone,
-                            //            format!("Task spawned: \n {:#?}", scheduled_task))
-                            //    .await.expect("Error with publishing spawning message");
-                            let future = tokio::task::spawn_blocking(move || {
-                                time::sleep(Duration::from_millis(
-                                    scheduled_task.task.processing_time,
-                                ))
-                            }).await.unwrap();
-
-                            let rn = random_percent();
-
-                            let s = if rn <= scheduled_task.task.success {
-                                "succeeded".to_string()
-                            } else {
-                                "failed".to_string()
-                            };
-
-                            future.await;
-                            let dl =
-                                match now.elapsed().as_millis() < scheduled_task.deadline as u128 {
-                                    true => "completed in time".to_string(),
-                                    false => "missed deadline".to_string(),
-                                };
-                            publish_msg(
-                                &client_clone,
-                                format!(
-                                    "COMPLETED {:8}. [{:9}] {}",
-                                    scheduled_task.task.name, s, dl
-                                ),
-                            )
-                            .await
-                            .expect("Error publishing finishing message");
-                        });
-                    }
-                }
-            });
-
-            // MQTT client loop until error
-            while let Ok(event) = eventloop.poll().await {
-                // listen for incoming publishings only
-                if let Event::Incoming(Packet::Publish(packet)) = event {
-                    if let Ok(payload) = String::from_utf8(packet.payload.to_vec()) {
-                        if let Ok(task) = serde_json::from_str::<Task>(&payload) {
-                            let mut queue = task_queue.lock().unwrap();
-                            let timestamp = SystemTime::now()
-                                .duration_since(SystemTime::UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis();
-                            println!("Task received {:?}", &task);
-
-                            let st = ScheduledTask {
-                                deadline: (&task.deadline - timestamp) as u64,
-                                task,
-                                received: Instant::now(),
-                            };
-                            queue.push(st);
-                        } else {
-                            eprintln!("Failed to deserialize task {:?}", payload);
-                        }
-                    } else {
-                        eprintln!("Failed to parse payload as UTF-8");
-                    }
+            let mut tasks_to_run = Vec::new();
+            // empty the priority queue
+            {
+                let mut q = task_queue_clone.lock().unwrap();
+                while let Some(_task) = q.peek() {
+                    // add all tasks to the queue
+                    println!("Adding task to the queue. {:?}", _task);
+                    tasks_to_run.push(q.pop().unwrap());
                 }
             }
-        })
+            // for each task that was in the queue, spawn a thread
+            for scheduled_task in tasks_to_run {
+                // println!("Scheduling task #{}", scheduled_task.id);
+
+                /* println!("METRICS =============\n{} - {}",
+                        thread_pool.metrics().num_alive_tasks(), thread_pool.metrics().num_workers());
+
+                */
+                let txn = tx.clone();
+                let permit_f = permits_clone.clone().acquire_owned();
+                tokio::spawn(async move {
+                    let permit = permit_f.await.unwrap();
+                    println!("Task {} is ready", scheduled_task.task.name);
+                    tokio::time::sleep(Duration::from_millis(scheduled_task.task.processing_time)).await;
+                    drop(permit);
+                    let finished_task = FinishedTask {
+                        task: scheduled_task,
+                        finished: Instant::now(),
+                    };
+                    txn.send(finished_task).unwrap();
+                });
+            }
+        }
+    });
+
+    // MQTT client loop until error
+    while let Ok(event) = eventloop.poll().await {
+        // listen for incoming publishings only
+        if let Event::Incoming(Packet::Publish(packet)) = event {
+            if let Ok(payload) = String::from_utf8(packet.payload.to_vec()) {
+                if let Ok(task) = serde_json::from_str::<Task>(&payload) {
+                    let mut queue = task_queue.lock().unwrap();
+                    let timestamp = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis();
+                    println!("Task received {:?}", &task);
+
+                    let st = ScheduledTask {
+                        deadline: (&task.deadline - timestamp) as u64,
+                        task,
+                        received: Instant::now(),
+                    };
+                    queue.push(st);
+                } else {
+                    eprintln!("Failed to deserialize task {:?}", payload);
+                }
+            } else {
+                eprintln!("Failed to parse payload as UTF-8");
+            }
+        }
+    }
 }
 
 async fn publish_msg(client: &AsyncClient, msg: String) -> Result<(), ClientError> {

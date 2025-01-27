@@ -4,6 +4,7 @@ import json
 import time
 import random
 import argparse
+import string
 import paho.mqtt.client as mqtt
 
 broker = "localhost"
@@ -93,13 +94,19 @@ def random_msg(m_id):
     return create_msg(name, int(processing_time), int(deadline), m_id, success)
 
 ## creates twice as many tasks with half of the deadline as processing time (should finish in time
-def test_optimal(workers):
+def test_optimal(workers, name):
     msgs = []
     for i in range(workers * 2):
-        msgs.append(create_msg("Task Nr. "+str(i), 1000, 1050, i, 1.))
+        msgs.append(create_msg("Task "+name+"--"+str(i), 1000, 1050, i, 1.))
 
     return msgs
 
+def rand_name(n):
+    char_set = string.ascii_uppercase + string.ascii_lowercase
+    return ''.join(random.sample(char_set*n, n))
+
+
+test_name = rand_name(4)
 def main():
 
     # paho setup
@@ -120,7 +127,7 @@ def main():
     msg_infos = []
 
     if args.test:
-        msgs = test_optimal(args.test)
+        msgs = test_optimal(args.test, test_name)
         # publish them without delay
         for msg in msgs:
             msg_infos.append(client.publish(topic, msg, qos=1))
