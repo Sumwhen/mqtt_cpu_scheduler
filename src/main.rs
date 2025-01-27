@@ -1,14 +1,16 @@
+use console_subscriber;
+use parking_lot::Mutex;
 use rand::Rng;
 use rumqttc::{AsyncClient, ClientError, Event, MqttOptions, Packet, QoS};
 use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::runtime::Runtime;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::Semaphore;
-use tokio::time::{self, Duration, Instant};
+use tokio::task::JoinHandle;
+use tokio::time::{Duration, Instant};
 
 const TOPIC: &str = "schedule";
 const PUBLISH_TOPIC: &str = "schedule/publish";
@@ -65,7 +67,9 @@ trait TimeRemaining {
 
 impl TimeRemaining for ScheduledTask {
     fn time_remaining(&self) -> i64 {
-        self.deadline as i64 - self.received.elapsed().as_millis() as i64 - self.task.processing_time as i64
+        self.deadline as i64
+            - self.received.elapsed().as_millis() as i64
+            - self.task.processing_time as i64
     }
 }
 impl Ord for ScheduledTask {
@@ -76,6 +80,7 @@ impl Ord for ScheduledTask {
 
 #[tokio::main]
 async fn main() {
+    console_subscriber::init();
     let mut mqttoptions = MqttOptions::new("scheduler-async", BROKER_HOST, BROKER_PORT);
     mqttoptions.set_keep_alive(Duration::from_secs(KEEPALIVE_INTERVAL));
     let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
@@ -95,7 +100,7 @@ async fn main() {
             } else {
                 "fail".to_string()
             };
-            let dl = match finished_task.finished.elapsed().as_millis()
+            let dl = match (finished_task.finished - finished_task.task.received).as_millis()
                 < finished_task.task.deadline as u128
             {
                 true => "completed in time".to_string(),
@@ -106,10 +111,11 @@ async fn main() {
             publish_msg(
                 &client_clone,
                 format!(
-                    "COMPLETED {:8}. in {}ms (min {}ms) [{:9}] {}",
+                    "COMPLETED {:8}. in {}ms (max {}ms, min {}ms) [{:9}] {}",
                     finished_task.task.task.name,
                     real_time.as_millis(),
                     finished_task.task.deadline,
+                    finished_task.task.task.processing_time,
                     s,
                     dl
                 ),
@@ -128,39 +134,44 @@ async fn main() {
     let task_queue_clone = task_queue.clone();
     tokio::spawn(async move {
         loop {
-
             let mut tasks_to_run = Vec::new();
             // empty the priority queue
             {
-                let mut q = task_queue_clone.lock().unwrap();
+                let mut q = task_queue_clone.lock();
                 while let Some(_task) = q.peek() {
                     // add all tasks to the queue
-                    println!("Adding task to the queue. {:?}", _task);
+                    println!("Adding task to the queue. {:?}", _task.task);
                     tasks_to_run.push(q.pop().unwrap());
                 }
             }
+
+            let mut tasks: Arc<Vec<JoinHandle<()>>> = Arc::new(Vec::new());
+            let mut task_clone = tasks.clone();
             // for each task that was in the queue, spawn a thread
             for scheduled_task in tasks_to_run {
-                // println!("Scheduling task #{}", scheduled_task.id);
-
-                /* println!("METRICS =============\n{} - {}",
-                        thread_pool.metrics().num_alive_tasks(), thread_pool.metrics().num_workers());
-
-                */
-                let txn = tx.clone();
-                let permit_f = permits_clone.clone().acquire_owned();
-                tokio::spawn(async move {
-                    let permit = permit_f.await.unwrap();
-                    println!("Task {} is ready", scheduled_task.task.name);
-                    tokio::time::sleep(Duration::from_millis(scheduled_task.task.processing_time)).await;
-                    drop(permit);
-                    let finished_task = FinishedTask {
-                        task: scheduled_task,
-                        finished: Instant::now(),
-                    };
-                    txn.send(finished_task).unwrap();
-                });
+                println!("Scheduling task #{}", scheduled_task.task.id);
+                {
+                    let txn = tx.clone();
+                    let prm_clone = permits_clone.clone().acquire_owned();
+                    let permit = prm_clone.await.unwrap();
+                    tokio::spawn(async move {
+                        println!("Awaiting lock task #{}", scheduled_task.task.id);
+                        println!("Task {} is ready", scheduled_task.task.name);
+                        tokio::time::sleep(Duration::from_millis(
+                            scheduled_task.task.processing_time,
+                        ))
+                        .await;
+                        let finished_task = FinishedTask {
+                            task: scheduled_task,
+                            finished: Instant::now(),
+                        };
+                        drop(permit);
+                        txn.send(finished_task).unwrap();
+                    });
+                }
             }
+            // await a short time to poll the last future
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
 
@@ -170,15 +181,15 @@ async fn main() {
         if let Event::Incoming(Packet::Publish(packet)) = event {
             if let Ok(payload) = String::from_utf8(packet.payload.to_vec()) {
                 if let Ok(task) = serde_json::from_str::<Task>(&payload) {
-                    let mut queue = task_queue.lock().unwrap();
+                    let mut queue = task_queue.lock();
                     let timestamp = SystemTime::now()
                         .duration_since(SystemTime::UNIX_EPOCH)
                         .unwrap()
                         .as_millis();
-                    println!("Task received {:?}", &task);
+                    // println!("Task received {:?}", &task);
 
                     let st = ScheduledTask {
-                        deadline: (&task.deadline - timestamp) as u64,
+                        deadline: (task.deadline as i64 - timestamp as i64) as u64,
                         task,
                         received: Instant::now(),
                     };
