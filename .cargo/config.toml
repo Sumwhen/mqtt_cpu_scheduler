@@ -1,2 +1,6 @@
 [build]
 rustflags = ["--cfg", "tokio_unstable"]
+
+
+[env]
+MY_WORKER_THREADS = "5"

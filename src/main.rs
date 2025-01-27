@@ -80,7 +80,12 @@ impl Ord for ScheduledTask {
 
 #[tokio::main]
 async fn main() {
+    // initialize debugger
     console_subscriber::init();
+
+
+
+    // set up mqtt topic subscription
     let mut mqttoptions = MqttOptions::new("scheduler-async", BROKER_HOST, BROKER_PORT);
     mqttoptions.set_keep_alive(Duration::from_secs(KEEPALIVE_INTERVAL));
     let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
@@ -90,7 +95,6 @@ async fn main() {
     let (tx, mut rx) = unbounded_channel::<FinishedTask>();
     // publishing thread
     let client_clone = client.clone();
-    // commit thread to work-stealing runtime
     tokio::spawn(async move {
         while let Some(finished_task) = rx.recv().await {
             let rn = random_percent();
@@ -145,18 +149,14 @@ async fn main() {
                 }
             }
 
-            let mut tasks: Arc<Vec<JoinHandle<()>>> = Arc::new(Vec::new());
-            let mut task_clone = tasks.clone();
             // for each task that was in the queue, spawn a thread
             for scheduled_task in tasks_to_run {
-                println!("Scheduling task #{}", scheduled_task.task.id);
-                {
+
+                { // add a scope we don't have to await the task
                     let txn = tx.clone();
                     let prm_clone = permits_clone.clone().acquire_owned();
                     let permit = prm_clone.await.unwrap();
                     tokio::spawn(async move {
-                        println!("Awaiting lock task #{}", scheduled_task.task.id);
-                        println!("Task {} is ready", scheduled_task.task.name);
                         tokio::time::sleep(Duration::from_millis(
                             scheduled_task.task.processing_time,
                         ))
@@ -170,8 +170,6 @@ async fn main() {
                     });
                 }
             }
-            // await a short time to poll the last future
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
 

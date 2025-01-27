@@ -77,8 +77,8 @@ def create_msg(name, ms, deadline, id, success):
     })
 
 ## creates a random mqtt message for our purposes with supplied id, with intervals in ms for processing
-def random_msg(m_id):
-    name = f"random_" + f"{str(m_id) = :0<6s}"
+def random_msg(m_id, name="DEFAULT"):
+    name = "rand_" + name + f"--{m_id}"
     deadline_min = 2000
     deadline_max = 5000 + (m_id * 500)
     # deadline in seconds
@@ -94,10 +94,12 @@ def random_msg(m_id):
     return create_msg(name, int(processing_time), int(deadline), m_id, success)
 
 ## creates twice as many tasks with half of the deadline as processing time (should finish in time
-def test_optimal(workers, name):
+def test_optimal(workers, name, inc = 3):
     msgs = []
-    for i in range(workers * 2):
-        msgs.append(create_msg("Task "+name+"--"+str(i), 1000, 1050, i, 1.))
+    pt = 1000
+    dl = pt * inc
+    for i in range(workers * inc):
+        msgs.append(create_msg("Task "+name+"--"+str(i), pt, dl, i, 1.))
 
     return msgs
 
@@ -138,9 +140,9 @@ def main():
         print(f"testing for {args.test} worker threads, generated {args.test * 2} tasks")
 
 
-    elif batch_size:
+    elif not batch_size:
         for i in range(n_msg):
-            msg = random_msg(msg_id)
+            msg = random_msg(msg_id, name=test_name)
             # print("publishing msg ", msg)
             if not args.dry:
                 msg_infos.append(client.publish(topic, msg, qos=1))
@@ -159,7 +161,7 @@ def main():
         for i in range(b):
             print(f"BRANCH {i} of {b}")
             for n in range(n_msg):
-                msg = random_msg(msg_id)
+                msg = random_msg(msg_id, name=test_name)
                 if not args.dry:
                     msg_infos.append(client.publish(topic, msg, qos=1))
                 else:
